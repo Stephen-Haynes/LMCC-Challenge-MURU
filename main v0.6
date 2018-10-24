@@ -1,0 +1,204 @@
+from network import LoRa
+import socket
+import time
+import binascii
+import pycom
+import ustruct
+from machine import ADC
+import time
+from machine import Pin, Timer
+
+
+pin = Pin(Pin.exp_board.G11, mode=Pin.IN, pull=Pin.PULL_UP)
+p_out = Pin(Pin.exp_board.G24, mode=Pin.OUT)
+p_out.value(0)
+
+echo = Pin(Pin.exp_board.G7, mode=Pin.IN)
+trigger = Pin(Pin.exp_board.G8, mode=Pin.OUT)
+trigger(0)
+chrono = Timer.Chrono()
+
+def distance_measure():
+    chrono.reset()
+
+    trigger(1)
+    time.sleep_us(10)
+    trigger(0)
+
+    while echo() == 0:
+        pass
+
+    chrono.start()
+
+    while echo() == 1:
+        pass
+
+    chrono.stop()
+
+    distance = chrono.read_us() / 58.0
+    return(distance)
+
+def adc_position():
+
+    # initialise adc hardware
+    #adc = ADC(0)
+    #create an object to sample ADC on pin 16 with attenuation of 11db (config 3)
+    #adc_c = adc.channel(attn=3, pin='P20')
+    # initialise the list
+    adc_samples = []
+    # take 10 samples and append them into the list
+    for count in range(20):
+        adc_samples.append(int(distance_measure()))
+    # sort the list
+    adc_samples = sorted(adc_samples)
+    # take the center list row value (median average)
+    adc_median = adc_samples[int(len(adc_samples)/2)]
+    # apply the function to scale to volts
+    print(adc_samples)
+
+    return int(adc_median)
+
+
+"""
+def adc_position():
+    # initialise adc hardware
+    adc = ADC(0)
+    #create an object to sample ADC on pin 16 with attenuation of 11db (config 3)
+    adc_c = adc.channel(attn=3, pin='P20')
+    # initialise the list
+    adc_samples = []
+    # take 10 samples and append them into the list
+    for count in range(10):
+        adc_samples.append(int(adc_c()))
+    # sort the list
+    adc_samples = sorted(adc_samples)
+    # take the center list row value (median average)
+    adc_median = adc_samples[int(len(adc_samples)/2)]
+    # apply the function to scale to volts
+    print(adc_samples)
+
+    return int(adc_median)
+"""
+
+def translate(value, leftMin, leftMax, rightMin, rightMax):
+    # Figure out how 'wide' each range is
+    leftSpan = leftMax - leftMin
+    rightSpan = rightMax - rightMin
+
+    # Convert the left range into a 0-1 range (float)
+    valueScaled = int(value - leftMin) / int(leftSpan)
+
+    # Convert the 0-1 range into a value in the right range.
+    return rightMin + (valueScaled * rightSpan)
+
+
+
+# disable LED heartbeat (so we can control the LED)
+pycom.heartbeat(False)
+# set LED to red
+pycom.rgbled(0x7f0000)
+
+# lora config
+lora = LoRa(mode=LoRa.LORAWAN, region=LoRa.AS923)
+# access info
+app_eui = binascii.unhexlify('70B3D57ED0012758')
+app_key = binascii.unhexlify('E43834D8D7F0D47A7E27B60D125D106A')
+
+# attempt join - continues attempts in background
+lora.join(activation=LoRa.OTAA, auth=(app_eui, app_key), timeout=100000)
+
+# wait for a connection
+print('Waiting for network connection...')
+while not lora.has_joined():
+    pass
+
+# we're online, set LED to green and notify via print
+pycom.rgbled(0x007f00)
+print('Network joined!')
+time.sleep(1)
+pycom.rgbled(000000) # turn off after blinking green
+
+# setup the socket
+s = socket.socket(socket.AF_LORA, socket.SOCK_RAW)
+s.setsockopt(socket.SOL_LORA, socket.SO_DR, 5)
+s.setblocking(False)
+s.bind(1)
+
+test = 0
+testpack = ustruct.pack('f',test)
+s.send(testpack)
+print('Sending 0')
+time.sleep(3)
+
+# check for a downlink payload, up to 64 bytes
+rx_pkt = s.recv(64)
+
+if len(rx_pkt) > 0:
+    print("Downlink data on port 200:", rx_pkt)
+    input("Downlink recieved, press any key to continue")
+
+
+time.sleep(10)
+
+position_last = 0
+cal_distance = adc_position()
+count = 0
+run_time = 30000 # 1 hour is 3.6e+6 in ms
+current_time = 0
+
+
+
+
+while True:
+    #print("Switch Reads: ",pin())
+    if pin() == 1:
+        tick = 0
+        position = 100-translate(adc_position(), 0, 200, 0, 100)
+        print("Position:  ", position)
+        print("Last Position: ", position_last)
+        if abs(position - position_last) > 10:
+            for count in range(3):
+                if abs(position-position_last) > 3:
+                    tick = tick + 1
+                    print("Positive change iterations: ", tick)
+                    print("Position change greater than 10%")
+                    print("Check back in 1 minute(s)")
+                    time.sleep(10)    #1 minute sleep
+                    position = 100-translate(adc_position(), 0, 200, 0, 100)
+        if tick > 2:
+            position_last = position
+            print("Position Updated, sending packet")
+            print("Position:  ", position)
+            # encode the packet, so that it's in BYTES (TTN friendly)
+            # could be extended like this struct.pack('f',lipo_voltage) + struct.pack('c',"example text")
+            packet = ustruct.pack('f',position)
+
+            # send the prepared packet via LoRa
+            #s.send(packet)
+
+            # example of unpacking a payload - unpack returns a sequence of
+            #immutable objects (a list) and in this case the first object is the only object
+            print ("Unpacked value is:", ustruct.unpack('f',packet)[0])
+            pycom.rgbled(0x007f00)
+            time.sleep(0.5)
+            pycom.rgbled(000000) # turn off after blinking green
+        time.sleep(30) #30 minutes
+    else:
+        #position =
+        if cal_distance - adc_position() > 20:
+            while cal_distance - adc_position() > 20:
+                pass
+                #position = adc_position()
+            count = count + 1
+        print("Count: ", count)
+        #print (time.ticks_ms())
+        #print (current_time)
+        if time.ticks_ms() - current_time > run_time:
+            packet = ustruct.pack('f', count)
+            s.send(packet)
+            print ("Sent Packet:", ustruct.unpack('f',packet)[0])
+            current_time = time.ticks_ms()
+            pycom.rgbled(0x007f00)
+            time.sleep(0.5)
+            pycom.rgbled(000000) # turn off after blinking green
+            time.sleep(1) #Wait after sending
