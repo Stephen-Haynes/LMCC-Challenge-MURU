@@ -127,7 +127,13 @@ while True:
         if len(rx_pkt) > 0:
             if debug == True:
                 print("Downlink data on port 200:", rx_pkt)
-            break
+            #initialise global variables
+            position_last = 0
+            cal_distance = adc_position()
+            count = 0
+            run_time = 30000 # 1 hour is 3.6e+6 in ms
+            current_time = 0
+            gap_time_start = utime.ticks_ms()
 
         #print("Switch Reads: ",pin())
         if pin() == 1: # switch away from usb
